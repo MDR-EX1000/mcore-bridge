@@ -205,7 +205,6 @@ class ModelConfig(TransformerConfig):
 
     # mtp
     mtp_unroll_steps: Optional[int] = None
-    mtp_loss_decay: Optional[float] = None
     decoder_input_detach: bool = True
 
     # visual
