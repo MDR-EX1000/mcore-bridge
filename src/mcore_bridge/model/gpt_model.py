@@ -465,7 +465,7 @@ class GPTModel(McoreGPTModel):
                         mtp_depth,
                         avg_group=parallel_state.get_data_parallel_group(with_context_parallel=True),
                     )
-                mtp_loss_scale = self.config.mtp_loss_scaling_factor / mtp_depth
+                mtp_loss_scale = self._get_mtp_loss_scale(mtp_layer_number, mtp_depth, mtp_loss)
                 if self.config.calculate_per_token_loss:
                     hidden_states = MTPLossAutoScaler.apply(hidden_states, mtp_loss_scale * mtp_loss)
                 else:
@@ -529,6 +529,15 @@ class GPTModel(McoreGPTModel):
         loss = self.compute_language_model_loss(labels, logits)
 
         return loss
+
+    def _get_mtp_loss_scale(self, mtp_layer_number: int, mtp_depth: int, ref_tensor: torch.Tensor):
+        decay = getattr(self.config, 'mtp_loss_decay', None)
+        if decay is None:
+            return self.config.mtp_loss_scaling_factor / mtp_depth
+
+        weights = ref_tensor.new_tensor([decay**i for i in range(mtp_depth)], dtype=torch.float32)
+        weights = weights / weights.sum()
+        return self.config.mtp_loss_scaling_factor * weights[mtp_layer_number]
 
     def get_input_tensor(self):
         return self.decoder.input_tensor

@@ -72,6 +72,7 @@ def test_mtp_block_reuses_single_physical_layer_across_unroll_steps():
 
 def test_postprocess_uses_unroll_steps_for_mtp_loss(monkeypatch):
     saved_losses = []
+    scaled_losses = []
     monkeypatch.setattr(
         gpt_model_mod,
         'roll_tensor',
@@ -80,7 +81,7 @@ def test_postprocess_uses_unroll_steps_for_mtp_loss(monkeypatch):
     monkeypatch.setattr(
         gpt_model_mod.MTPLossAutoScaler,
         'apply',
-        lambda hidden_states, scaled_loss: hidden_states,
+        lambda hidden_states, scaled_loss: (scaled_losses.append(scaled_loss.clone()), hidden_states)[1],
     )
     monkeypatch.setattr(
         gpt_model_mod.MTPLossLoggingHelper,
@@ -117,6 +118,7 @@ def test_postprocess_uses_unroll_steps_for_mtp_loss(monkeypatch):
             context_parallel_size=1,
             mtp_num_layers=1,
             mtp_unroll_steps=3,
+            mtp_loss_decay=None,
             decoder_input_detach=True,
             calculate_per_token_loss=False,
             mtp_loss_scaling_factor=0.3,
@@ -125,6 +127,7 @@ def test_postprocess_uses_unroll_steps_for_mtp_loss(monkeypatch):
         ),
         compute_language_model_loss=lambda labels, logits: logits.float(),
     )
+    model._get_mtp_loss_scale = GPTModel._get_mtp_loss_scale.__get__(model, GPTModel)
 
     loss = GPTModel._postprocess(
         model,
@@ -149,6 +152,21 @@ def test_postprocess_uses_unroll_steps_for_mtp_loss(monkeypatch):
     assert loss.shape == (1, 1)
     assert [call[0, 0, 0].item() for call in output_layer.calls] == [1.0, 2.0, 3.0, 0.0]
     assert saved_losses == [(0, 3), (1, 3), (2, 3)]
+    assert [scaled_loss.item() for scaled_loss in scaled_losses] == pytest.approx([0.1, 0.2, 0.3], rel=1e-6)
+
+
+def test_mtp_loss_decay_reweights_unrolled_steps():
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            mtp_loss_scaling_factor=0.3,
+            mtp_loss_decay=0.5,
+        ))
+    model._get_mtp_loss_scale = GPTModel._get_mtp_loss_scale.__get__(model, GPTModel)
+
+    ref_tensor = torch.tensor(1.0)
+    scales = [model._get_mtp_loss_scale(i, 3, ref_tensor).item() for i in range(3)]
+
+    assert scales == pytest.approx([0.17142857, 0.08571429, 0.04285714], rel=1e-6)
 
 
 if __name__ == '__main__':
