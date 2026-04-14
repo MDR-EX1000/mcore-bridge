@@ -535,8 +535,9 @@ class GPTModel(McoreGPTModel):
         if decay is None:
             return self.config.mtp_loss_scaling_factor / mtp_depth
 
-        return self.config.mtp_loss_scaling_factor * ref_tensor.new_tensor(
-            decay**(mtp_layer_number + 1), dtype=torch.float32)
+        weights = ref_tensor.new_tensor([decay**i for i in range(mtp_depth)], dtype=torch.float32)
+        weights = weights / weights.sum()
+        return self.config.mtp_loss_scaling_factor * weights[mtp_layer_number]
 
     def get_input_tensor(self):
         return self.decoder.input_tensor

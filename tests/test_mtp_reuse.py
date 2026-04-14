@@ -166,7 +166,7 @@ def test_mtp_loss_decay_reweights_unrolled_steps():
     ref_tensor = torch.tensor(1.0)
     scales = [model._get_mtp_loss_scale(i, 3, ref_tensor).item() for i in range(3)]
 
-    assert scales == pytest.approx([0.15, 0.075, 0.0375], rel=1e-6)
+    assert scales == pytest.approx([0.17142857, 0.08571429, 0.04285714], rel=1e-6)
 
 
 if __name__ == '__main__':
