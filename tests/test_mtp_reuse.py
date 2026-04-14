@@ -3,7 +3,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import mcore_bridge  # noqa: F401
 import mcore_bridge.model.gpt_model as gpt_model_mod
 from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionBlock
 from mcore_bridge.model.gpt_model import GPTModel
@@ -72,6 +71,7 @@ def test_mtp_block_reuses_single_physical_layer_across_unroll_steps():
 
 def test_postprocess_uses_unroll_steps_for_mtp_loss(monkeypatch):
     saved_losses = []
+    scaled_losses = []
     monkeypatch.setattr(
         gpt_model_mod,
         'roll_tensor',
@@ -80,7 +80,7 @@ def test_postprocess_uses_unroll_steps_for_mtp_loss(monkeypatch):
     monkeypatch.setattr(
         gpt_model_mod.MTPLossAutoScaler,
         'apply',
-        lambda hidden_states, scaled_loss: hidden_states,
+        lambda hidden_states, scaled_loss: (scaled_losses.append(scaled_loss.clone()), hidden_states)[1],
     )
     monkeypatch.setattr(
         gpt_model_mod.MTPLossLoggingHelper,
@@ -117,6 +117,7 @@ def test_postprocess_uses_unroll_steps_for_mtp_loss(monkeypatch):
             context_parallel_size=1,
             mtp_num_layers=1,
             mtp_unroll_steps=3,
+            mtp_loss_decay=0.5,
             decoder_input_detach=True,
             calculate_per_token_loss=False,
             mtp_loss_scaling_factor=0.3,
@@ -149,6 +150,76 @@ def test_postprocess_uses_unroll_steps_for_mtp_loss(monkeypatch):
     assert loss.shape == (1, 1)
     assert [call[0, 0, 0].item() for call in output_layer.calls] == [1.0, 2.0, 3.0, 0.0]
     assert saved_losses == [(0, 3), (1, 3), (2, 3)]
+    assert [scaled_loss.item() for scaled_loss in scaled_losses] == pytest.approx([0.3, 0.3, 0.225], rel=1e-6)
+
+
+def test_mtp_loss_decay_reweights_unrolled_steps(monkeypatch):
+    scaled_losses = []
+    monkeypatch.setattr(
+        gpt_model_mod,
+        'roll_tensor',
+        lambda tensor, shifts, dims, cp_group=None, packed_seq_params=None: (tensor, tensor.numel()),
+    )
+    monkeypatch.setattr(
+        gpt_model_mod.MTPLossAutoScaler,
+        'apply',
+        lambda hidden_states, scaled_loss: (scaled_losses.append(scaled_loss.clone()), hidden_states)[1],
+    )
+    monkeypatch.setattr(gpt_model_mod, 'has_config_logger_enabled', lambda config: False)
+
+    output_layer = RecordingOutputLayer()
+
+    def mtp_forward(**kwargs):
+        hidden_states = kwargs['hidden_states']
+        return torch.cat([hidden_states] * 4, dim=0)
+
+    model = SimpleNamespace(
+        post_process=True,
+        mtp_process=True,
+        training=False,
+        share_embeddings_and_output_weights=False,
+        cp_group=None,
+        embedding=lambda *args, **kwargs: None,
+        output_layer=output_layer,
+        mtp=mtp_forward,
+        config=SimpleNamespace(
+            task_type='causal_lm',
+            is_multimodal=False,
+            context_parallel_size=1,
+            mtp_num_layers=1,
+            mtp_unroll_steps=3,
+            mtp_loss_scaling_factor=0.3,
+            mtp_loss_decay=0.5,
+            decoder_input_detach=True,
+            calculate_per_token_loss=False,
+            sequence_parallel=False,
+            tensor_model_parallel_size=1,
+        ),
+        compute_language_model_loss=lambda labels, logits: torch.ones_like(logits, dtype=torch.float),
+    )
+
+    loss = GPTModel._postprocess(
+        model,
+        hidden_states=torch.zeros(1, 1, 1),
+        input_ids=None,
+        position_ids=None,
+        labels=torch.ones(1, 1, dtype=torch.long),
+        rotary_pos_emb=None,
+        rotary_pos_cos=None,
+        rotary_pos_sin=None,
+        loss_mask=torch.ones(1, 1, dtype=torch.bool),
+        decoder_input=None,
+        attention_mask=None,
+        inference_params=None,
+        packed_seq_params=None,
+        sequence_len_offset=None,
+        runtime_gather_output=False,
+        extra_block_kwargs=None,
+        inference_context=None,
+    )
+
+    assert loss.shape == (1, 1)
+    assert [scaled_loss.item() for scaled_loss in scaled_losses] == pytest.approx([0.3, 0.15, 0.075], rel=1e-6)
 
 
 if __name__ == '__main__':

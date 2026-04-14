@@ -465,7 +465,8 @@ class GPTModel(McoreGPTModel):
                         mtp_depth,
                         avg_group=parallel_state.get_data_parallel_group(with_context_parallel=True),
                     )
-                mtp_loss_scale = self.config.mtp_loss_scaling_factor / mtp_depth
+                decay = getattr(self.config, 'mtp_loss_decay', 1.0)
+                mtp_loss_scale = self.config.mtp_loss_scaling_factor * (decay**mtp_layer_number)
                 if self.config.calculate_per_token_loss:
                     hidden_states = MTPLossAutoScaler.apply(hidden_states, mtp_loss_scale * mtp_loss)
                 else:
